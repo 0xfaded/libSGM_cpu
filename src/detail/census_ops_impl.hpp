@@ -6,6 +6,7 @@
 namespace sgm_cpu {
 namespace detail {
 
+
 template <class Tune>
 void CensusOps<Tune>::execute_block(
     const input_type *src,
@@ -15,7 +16,30 @@ void CensusOps<Tune>::execute_block(
     int src_pitch,
     int dst_pitch) {
 
+  static_assert(Tune::census::v_step >= 2,
+      "Tune::census::v_step == 1 not supported (yet!)");
+
+  execute_block_x2(src, dst, width, height, src_pitch, dst_pitch);
+}
+
+template <class Tune>
+void CensusOps<Tune>::execute_block_x2(
+    const input_type *src,
+    feature_type *dst,
+    int width,
+    int height,
+    int src_pitch,
+    int dst_pitch) {
+
   using simd = typename Tune::simd;
+
+  // Input image must be at least patch size
+  if ((width < consts::h_patch) || (height < consts::v_patch)) {
+    std::cerr << "CensusOps::execute_block: minimium image size " <<
+      consts::h_patch << "x" << consts::v_patch <<
+      " (input image " << width << "x" << height << ")\n";
+    return;
+  }
 
   dst_pitch = (dst_pitch == -1) ? width : dst_pitch;
 
@@ -23,41 +47,56 @@ void CensusOps<Tune>::execute_block(
 
   // Improve cache performance across rows (especially on architectures with
   // limited simd registers) by processing the image in blocks.
-  for (int by = 0; by < Tune::census::v_block; by += Tune::census::v_step) {
+  const int by_end = std::min(height, Tune::census::v_block);
+  for (int by = 0; by < by_end; by += Tune::census::v_step) {
 
-    // change row0 reference to top of input patches
-    const uint8_t *row0 = reinterpret_cast<const uint8_t *>(src);
+    if ((by + Tune::census::v_step) > by_end) {
+      // avoid overshoot
+      int overshoot = (by + Tune::census::v_step) - by_end;
+      src -= overshoot * src_pitch;
+      dst -= overshoot * dst_pitch;
 
-    // Load the leftmost part of the patch, including 3 pixels above and below.
-    for (size_t i = 0; i < r.row2.size(); i += 1) {
-      simd::load_row2_init(r.row2[i], row0, src_pitch);
-      row0 += 2*src_pitch;
+      // no need to confuse the compiler by updating "by",
+      // loop will terminate regardless.
     }
 
-    int bx = 0;
-    goto row_loaded;
+    // This assumption is explained in header. Only 8-bit inputs supported.
+    static_assert(sizeof(*src) == 1, "Only 8-bit input types supported");
+    const uint8_t *src0 = reinterpret_cast<const uint8_t *>(src);
+    feature_type *dst0 = dst;
 
-    for (; bx < Tune::census::h_block; bx += Tune::census::h_step) {
+    const int bx_end = std::min(width, Tune::census::h_block);
+    for (int bx = 0; bx < bx_end; bx += Tune::census::h_step) {
 
-    // load_row2_init has already loaded pixels and loadrow2_next must not
-    // be called on first iteration. (implementations may assume h_step valid
-    // values before input pointers).
-    for (size_t i = 0; i < r.row2.size(); i += 1) {
-      simd::load_row2_next(r.row2[i], row0, src_pitch);
-      row0 += 2*src_pitch;
-    }
+      if ((bx + Tune::census::h_step) > bx_end) {
+        // avoid overshoot
+        int overshoot = (bx + Tune::census::h_step) - bx_end;
+        src0 -= overshoot;
+        dst0 -= overshoot;
 
-  row_loaded:
+        // no need to confuse the compiler by updating "bx",
+        // loop will terminate regardless.
+      }
 
-      execute_patch_x2(r, dst, dst_pitch);
-      row0 += bx;
+      // load pixel patch
+      const uint8_t *row0 = reinterpret_cast<const uint8_t *>(src0);
+      for (size_t i = 0; i < r.row2.size(); i += 1) {
+        simd::load_row2(r.row2[i], row0, src_pitch);
+        row0 += 2*src_pitch;
+      }
+
+      execute_patch_x2(r, dst0, dst_pitch);
+      src0 += Tune::census::h_step;
+      dst0 += Tune::census::h_step;
+
     }
     src += Tune::census::v_step * src_pitch;
+    dst += Tune::census::v_step * dst_pitch;
   }
 }
 
 
-// Implementation for 128-bit architectures registers where two rows
+// Implementation for 128-bit registers where two rows
 // (128-bits each) are processed simutaneously.
 template <class Tune>
 void CensusOps<Tune>::execute_patch_x2(
@@ -82,6 +121,7 @@ void CensusOps<Tune>::execute_patch_x2(
 
   for (int x = 0; x < feature_half_width; x += 1) {
 
+    /*
     std::cout << "in :\n";
     for (int y = 0; y < 4; y += 1) {
       for (int i = 0; i < 8; i += 1) {
@@ -99,6 +139,7 @@ void CensusOps<Tune>::execute_patch_x2(
       }
       std::cout << "\n";
     }
+    */
 
 
     for (int y = 0; y < n_iterations; y += 1) {
@@ -114,12 +155,14 @@ void CensusOps<Tune>::execute_patch_x2(
       p = simd::cmp_row2(r.row2[y+0], r.row2[y+3]);
       out = simd::template bsel2<0>(out, p);
 
+      /*
       std::cout << "p0 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       // The same is true for all other comparisons:
       //
@@ -128,36 +171,42 @@ void CensusOps<Tune>::execute_patch_x2(
       p = simd::cmp_row2(r.row2[y+1], r.row2[y+2]);
       out = simd::template bsel2<1>(out, p);
 
+      /*
       std::cout << "p1 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       //   p[0] = row[4].left < row[2].right
       //   p[1] = row[5].left < row[3].right
       p = simd::cmp_row2(r.row2[y+2], r.row2[y+1]);
       out = simd::template bsel2<2>(out, p);
 
+      /*
       std::cout << "p2 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       //   p[0] = row[6].left < row[0].right
       //   p[1] = row[7].left < row[1].right
       p = simd::cmp_row2(r.row2[y+3], r.row2[y+0]);
       out = simd::template bsel2<3>(out, p);
 
+      /*
       std::cout << "p3 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       // We've compared the even rows, now we need the odd rows.
       // Registers are renamed for clarity. After transpose:
@@ -182,6 +231,7 @@ void CensusOps<Tune>::execute_patch_x2(
       simd::transpose_row2(odd_2, odd_1);
       simd::transpose_row2(odd_0, odd_2);
 
+      /*
     std::cout << "odd:\n";
     for (int y = 0; y < 4; y += 1) {
       for (int i = 0; i < 8; i += 1) {
@@ -199,6 +249,7 @@ void CensusOps<Tune>::execute_patch_x2(
       }
       std::cout << "\n";
     }
+    */
 
       // self comparison for pixels left and right of center on same row:
       //   p[0] = row[3].left < row[3].right
@@ -206,36 +257,42 @@ void CensusOps<Tune>::execute_patch_x2(
       p = simd::cmp_row2(odd_1, odd_1);
       out = simd::template bsel2<5>(out, p);
 
+      /*
       std::cout << "p5 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       //   p[0] = row[1].left < row[5].right
       //   p[1] = row[2].left < row[6].right
       p = simd::cmp_row2(odd_0, odd_2);
       out = simd::template bsel2<4>(out, p);
 
+      /*
       std::cout << "p4 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       //   p[0] = row[5].left < row[1].right
       //   p[1] = row[6].left < row[2].right
       p = simd::cmp_row2(odd_2, odd_0);
       out = simd::template bsel2<6>(out, p);
 
+      /*
       std::cout << "p6 " << p.reg0 << "\n";
 
       for (int i = 0; i < 16; i += 1) {
         std::cout << std::setw(2) << std::hex << static_cast<int>(out.reg0.at(i)) << " ";
       }
       std::cout << "\n";
+      */
 
       // undo the transpose
       simd::transpose_row2(odd_0, odd_2);
@@ -243,6 +300,7 @@ void CensusOps<Tune>::execute_patch_x2(
       simd::transpose_row2(odd_x, odd_0);
       simd::transpose_row2(odd_1, odd_0);
 
+      /*
     std::cout << "even:\n";
     for (int y = 0; y < 4; y += 1) {
       for (int i = 0; i < 8; i += 1) {
@@ -262,6 +320,7 @@ void CensusOps<Tune>::execute_patch_x2(
     }
 
       std::cout << "x, y = " << x << ", " << y << "\n";
+    */
 
       out2[y][x] = out;
     }
@@ -279,8 +338,8 @@ void CensusOps<Tune>::execute_patch_x2(
     for (int i = 0; i < 8; i += 1) {
       std::cout << " " << std::setw(2) << std::hex << static_cast<int>(r.row2[0].reg1[i]);
     }
-    */
     std::cout << "\n\n";
+    */
   }
 
   // Finish with comparisons above and below center pixel.
@@ -311,6 +370,7 @@ void CensusOps<Tune>::execute_patch_x2(
     p = simd::cmp_row2(odd_0, odd_2);
     out2[y][2] = simd::template bsel2<7>(out2[y][2], p);
 
+    /*
     std::cout << "prezip\n";
 
     for (int j = 0; j < 4; j += 1) {
@@ -323,10 +383,12 @@ void CensusOps<Tune>::execute_patch_x2(
       std::cout << "\n";
     }
     std::cout << "\n";
+    */
 
     // zip together results from each column into a single 32-bit descriptor.
     simd::zip4b2(out2[y][0], out2[y][1], out2[y][2], out2[y][3]);
 
+    /*
     std::cout << "postzip\n";
 
     for (int j = 0; j < 4; j += 1) {
@@ -339,6 +401,7 @@ void CensusOps<Tune>::execute_patch_x2(
       std::cout << "\n";
     }
     std::cout << "\n";
+    */
 
     // store descriptors for rows(2)*h_step(8) = (16) pixels
     uint32_t *dst0 = dst;

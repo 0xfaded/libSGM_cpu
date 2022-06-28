@@ -12,7 +12,7 @@ struct Array128 {
 
   struct census {
     static constexpr int h_block = 64;
-    static constexpr int v_block = 32;
+    static constexpr int v_block = 64;
 
     static constexpr int h_step = 8;
     static constexpr int v_step = 2;

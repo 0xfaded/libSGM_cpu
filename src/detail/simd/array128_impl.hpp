@@ -35,7 +35,7 @@ struct array128_impl {
   }
 
   inline static
-  void load_row2_init(reg::x2_t &r, const uint8_t *src, ptrdiff_t pitch) {
+  void load_row2(reg::x2_t &r, const uint8_t *src, ptrdiff_t pitch) {
     const uint8_t *src0 = src + 0*pitch;
     const uint8_t *src1 = src + 1*pitch;
 
@@ -44,18 +44,6 @@ struct array128_impl {
 
     std::copy(src0 + 8, src0 + 16, r.reg1.begin());
     std::copy(src1 + 8, src1 + 16, r.reg1.begin() + 8);
-  }
-
-  inline static
-  void load_row2_next(reg::x2_t &r, const uint8_t *src, ptrdiff_t pitch) {
-    const uint8_t *src0 = src + 0*pitch;
-    const uint8_t *src1 = src + 1*pitch;
-
-    std::copy(src0 - 8, src0, r.reg0.begin());
-    std::copy(src1 - 8, src0, r.reg0.begin() + 8);
-
-    std::copy(src0, src0 + 8, r.reg1.begin());
-    std::copy(src1, src1 + 8, r.reg1.begin() + 8);
   }
 
   inline static

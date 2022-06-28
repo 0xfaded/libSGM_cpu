@@ -12,8 +12,99 @@ namespace test {
 */
 using namespace sgm_cpu;
 
-static uint32_t compute_census(const uint8_t *src, int src_pitch);
-static std::ostream &print_descriptor(std::ostream &os, uint32_t desc);
+static
+std::vector<uint8_t> random_patch(int w, int h, std::minstd_rand0 &rng);
+
+static
+uint32_t compute_census(const uint8_t *src, int src_pitch);
+
+static
+std::vector<uint32_t> apply_census(const uint8_t *src,
+    int width, int height, int src_pitch);
+
+[[maybe_unused]] static
+std::ostream &print_descriptor(std::ostream &os, uint32_t desc);
+
+TEST(CensusOpsTest, ExecuteBlockX2) {
+  std::minstd_rand0 rng;
+
+  using Ops = detail::CensusOps<tune::Array128>;
+
+  constexpr uint32_t sentinel = 0xffffffff;
+
+  int W = Ops::tune::census::h_block + 8;
+  int H = Ops::tune::census::v_block + 6;
+
+  std::vector<uint8_t> patch = random_patch(W, H, rng);
+  std::vector<uint32_t> reference = apply_census(patch.data(), W, H, W);
+
+  std::vector<uint32_t> output(reference.size() + 1);
+  output.back() = sentinel;
+
+  char *src = reinterpret_cast<char *>(patch.data());
+  Ops::execute_block_x2(src, output.data(), W-8, H-6, W, W-8);
+
+  for (size_t i = 0; i < reference.size(); i += 1) {
+    ASSERT_EQ(output[i], reference[i]);
+  }
+
+  ASSERT_EQ(output.back(), sentinel);
+}
+
+TEST(CensusOpsTest, ExecuteBlockX2_Undersize) {
+  std::minstd_rand0 rng;
+
+  using Ops = detail::CensusOps<tune::Array128>;
+
+  constexpr uint32_t sentinel = 0xffffffff;
+
+  int W = Ops::tune::census::h_block;
+  int H = Ops::tune::census::v_block;
+
+  std::vector<uint8_t> patch = random_patch(W, H, rng);
+  std::vector<uint32_t> reference = apply_census(patch.data(), W, H, W);
+
+  std::vector<uint32_t> output(reference.size() + 1);
+  output.back() = sentinel;
+
+  char *src = reinterpret_cast<char *>(patch.data());
+  Ops::execute_block_x2(src, output.data(), W-8, H-6, W, W-8);
+
+  for (size_t i = 0; i < reference.size(); i += 1) {
+    ASSERT_EQ(output[i], reference[i]);
+  }
+
+  ASSERT_EQ(output.back(), sentinel);
+}
+
+TEST(CensusOpsTest, ExecuteBlockX2_Oversize) {
+  std::minstd_rand0 rng;
+
+  using Ops = detail::CensusOps<tune::Array128>;
+
+  constexpr uint32_t sentinel = 0xffffffff;
+
+  int W = Ops::tune::census::h_block + 2*8;
+  int H = Ops::tune::census::v_block + 2*8;
+
+  std::vector<uint8_t> patch = random_patch(W, H, rng);
+  std::vector<uint32_t> reference = apply_census(patch.data(), W, H, W);
+
+  std::vector<uint32_t> output(reference.size() + 1);
+  output.back() = sentinel;
+
+  char *src = reinterpret_cast<char *>(patch.data());
+  Ops::execute_block_x2(src, output.data(), W-8, H-6, W, W-8);
+
+  for (int y = 0; y < Ops::tune::census::h_block; y += 1) {
+    for (int x = 0; x < Ops::tune::census::h_block; x += 1) {
+      int i = y*(W-8) + x; // only test processed region
+      ASSERT_EQ(output[i], reference[i]);
+    }
+  }
+
+  ASSERT_EQ(output.back(), sentinel);
+}
 
 TEST(CensusOpsTest, ExecutePatchX2) {
   std::minstd_rand0 rng;
@@ -21,21 +112,10 @@ TEST(CensusOpsTest, ExecutePatchX2) {
   constexpr int src_pitch = 16;
   constexpr int dst_pitch = 8;
 
-  std::array<uint8_t, src_pitch*8> patch;
+  std::vector<uint8_t> patch = random_patch(16, 8, rng);
+
   std::array<uint32_t, dst_pitch*2> output;
-
-  std::generate(patch.begin(), patch.end(), [&rng]() {
-      return rng();
-  });
   std::fill(output.begin(), output.end(), 0);
-
-  /*
-  for (int y = 0; y < 8; y += 1) {
-    for (int x = 0; x < 16; x += 1) {
-      patch[y*src_pitch+x] = y*src_pitch+x;
-    }
-  }
-  */
 
   using Ops = detail::CensusOps<tune::Array128>;
 
@@ -43,7 +123,7 @@ TEST(CensusOpsTest, ExecutePatchX2) {
 
   for (size_t i = 0; i < r.row2.size(); i += 1) {
     const uint8_t *src = patch.data()+2*src_pitch*i;
-    Ops::tune::simd::load_row2_init(r.row2[i], src, src_pitch);
+    Ops::tune::simd::load_row2(r.row2[i], src, src_pitch);
   }
 
   Ops::execute_patch_x2(r, output.data(), 8);
@@ -53,12 +133,38 @@ TEST(CensusOpsTest, ExecutePatchX2) {
       uint32_t ref = compute_census(patch.data() + y*src_pitch + x, src_pitch);
       uint32_t desc = output[y*dst_pitch+x];
 
-      print_descriptor(std::cout << "ref: ", ref) << "\n";
-      print_descriptor(std::cout << "out: ", desc) << "\n\n";
-
       ASSERT_EQ(ref, desc);
     }
   }
+}
+
+std::vector<uint8_t> random_patch(int w, int h, std::minstd_rand0 &rng) {
+  std::vector<uint8_t> patch(w * h);
+
+  std::generate(patch.begin(), patch.end(), [&rng]() {
+      return rng();
+  });
+
+  return patch;
+}
+
+std::vector<uint32_t> apply_census(
+    const uint8_t *src,
+    int width,
+    int height,
+    int src_pitch) {
+
+  std::vector<uint32_t> dst((width-8)*(height-6));
+
+  int i = 0;
+  for (int y = 0; y < height-6; y += 1) {
+    for (int x = 0; x < width-8; x += 1) {
+      dst[i] = compute_census(src + y*src_pitch + x, src_pitch);
+      i += 1;
+    }
+  }
+
+  return dst;
 }
 
 uint32_t compute_census(const uint8_t *src, int src_pitch) {
