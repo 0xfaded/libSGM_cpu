@@ -6,11 +6,8 @@
 
 #include <gtest/gtest.h>
 
-/*
 namespace sgm_cpu {
 namespace test {
-*/
-using namespace sgm_cpu;
 
 static
 std::vector<uint8_t> random_patch(int w, int h, std::minstd_rand0 &rng);
@@ -24,6 +21,32 @@ std::vector<uint32_t> apply_census(const uint8_t *src,
 
 [[maybe_unused]] static
 std::ostream &print_descriptor(std::ostream &os, uint32_t desc);
+
+TEST(CensusOpsTest, ExecuteCensus) {
+  std::minstd_rand0 rng;
+
+  using Ops = detail::CensusOps<tune::Array128>;
+
+  constexpr uint32_t sentinel = 0xffffffff;
+
+  int W = 3 * Ops::tune::census::h_block + 16;
+  int H = 3 * Ops::tune::census::v_block + 7;
+
+  std::vector<uint8_t> patch = random_patch(W, H, rng);
+  std::vector<uint32_t> reference = apply_census(patch.data(), W, H, W);
+
+  std::vector<uint32_t> output(reference.size() + 1);
+  output.back() = sentinel;
+
+  char *src = reinterpret_cast<char *>(patch.data());
+  Ops::execute_census(src, output.data(), W, H, W, W-8);
+
+  for (size_t i = 0; i < reference.size(); i += 1) {
+    ASSERT_EQ(output[i], reference[i]) << "i = " << i << "\n";
+  }
+
+  ASSERT_EQ(output.back(), sentinel);
+}
 
 TEST(CensusOpsTest, ExecuteBlockX2) {
   std::minstd_rand0 rng;
@@ -59,7 +82,7 @@ TEST(CensusOpsTest, ExecuteBlockX2_Undersize) {
   constexpr uint32_t sentinel = 0xffffffff;
 
   int W = Ops::tune::census::h_block;
-  int H = Ops::tune::census::v_block;
+  int H = Ops::tune::census::v_block + 1;
 
   std::vector<uint8_t> patch = random_patch(W, H, rng);
   std::vector<uint32_t> reference = apply_census(patch.data(), W, H, W);
@@ -175,7 +198,7 @@ uint32_t compute_census(const uint8_t *src, int src_pitch) {
     int bit;
   };
 
-  static std::vector<Comparison> comparisons = {
+  static constexpr Comparison comparisons[] = {
     {0, 0, 8, 6, 0},
     {0, 2, 8, 4, 1},
     {0, 4, 8, 2, 2},
@@ -230,6 +253,6 @@ static std::ostream &print_descriptor(std::ostream &os, uint32_t desc) {
   return os;
 }
 
-//} // namespace test
-//} // namespace sgm_cpu
+} // namespace test
+} // namespace sgm_cpu
 

@@ -14,6 +14,14 @@ class CensusOps {
 
   struct PatchLayout;
 
+  static void execute_census(
+      const input_type *src,
+      feature_type *dst,
+      int width,
+      int height,
+      int src_pitch,
+      int dst_pitch);
+
   static void execute_block(
       const input_type *src,
       feature_type *dst,
@@ -37,6 +45,7 @@ class CensusOps {
 
   struct consts {
     static constexpr int feature_width = 9;
+    static constexpr int feature_height = 7;
 
     static constexpr int v_patch = Tune::census::v_step + 6;
     static constexpr int h_patch = 16;

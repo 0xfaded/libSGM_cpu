@@ -6,6 +6,75 @@
 namespace sgm_cpu {
 namespace detail {
 
+template <class Tune>
+void CensusOps<Tune>::execute_census(
+    const input_type *src,
+    feature_type *dst,
+    int width,
+    int height,
+    int src_pitch,
+    int dst_pitch) {
+
+  // Input image must be at least patch size
+  if ((width < consts::h_patch) || (height < consts::v_patch)) {
+    std::cerr << "CensusOps::execute_block: minimium image size " <<
+      consts::h_patch << "x" << consts::v_patch <<
+      " (input image " << width << "x" << height << ")\n";
+    return;
+  }
+
+  // subtract border
+  height -= (consts::feature_height - 1);
+  width -= (consts::feature_width - 1);
+
+  // It's tempting for people to change the feature size thinking they will
+  // get better descriptors. This would lead to memory errors,
+  // so put in an additional asserts
+  static_assert(consts::feature_width == 9, "Do not change the feature size!");
+  static_assert(consts::feature_height == 7, "Do not change the feature size!");
+
+  for (int y = 0; y < height; y += tune::census::v_block) {
+
+    int block_height = std::min(tune::census::v_block, height - y);
+
+    // check if block is shorter than minimum patch height, adjust
+    if (block_height < consts::v_patch) {
+      int overlap = consts::v_patch - block_height;
+
+      src -= src_pitch * overlap;
+      dst -= dst_pitch * overlap;
+
+      block_height = consts::v_patch;
+    }
+
+    const input_type *src0 = src;
+    feature_type *dst0 = dst;
+
+    for (int x = 0; x < width; x += tune::census::h_block) {
+
+      int block_width = std::min(tune::census::h_block, width - x);
+
+      // check if block is thinner than minimum patch width, adjust
+      if (block_width < consts::h_patch) {
+        int overlap = consts::h_patch - block_width;
+
+        src0 -= overlap;
+        dst0 -= overlap;
+
+        block_width = consts::h_patch;
+      }
+
+      execute_block_x2(src0, dst0, block_width, block_height,
+          src_pitch, dst_pitch);
+
+      src0 += tune::census::h_block;
+      dst0 += tune::census::h_block;
+    }
+
+    src += src_pitch * tune::census::v_block;
+    dst += dst_pitch * tune::census::v_block;
+  }
+}
 
 template <class Tune>
 void CensusOps<Tune>::execute_block(
@@ -33,9 +102,9 @@ void CensusOps<Tune>::execute_block_x2(
 
   using simd = typename Tune::simd;
 
-  // Input image must be at least patch size
+  // Input block must be at least patch size
   if ((width < consts::h_patch) || (height < consts::v_patch)) {
-    std::cerr << "CensusOps::execute_block: minimium image size " <<
+    std::cerr << "CensusOps::execute_block: minimium block size " <<
       consts::h_patch << "x" << consts::v_patch <<
       " (input image " << width << "x" << height << ")\n";
     return;
@@ -47,12 +116,11 @@ void CensusOps<Tune>::execute_block_x2(
 
   // Improve cache performance across rows (especially on architectures with
   // limited simd registers) by processing the image in blocks.
-  const int by_end = std::min(height, Tune::census::v_block);
-  for (int by = 0; by < by_end; by += Tune::census::v_step) {
+  for (int by = 0; by < height; by += Tune::census::v_step) {
 
-    if ((by + Tune::census::v_step) > by_end) {
+    if ((by + Tune::census::v_step) > height) {
       // avoid overshoot
-      int overshoot = (by + Tune::census::v_step) - by_end;
+      int overshoot = (by + Tune::census::v_step) - height;
       src -= overshoot * src_pitch;
       dst -= overshoot * dst_pitch;
 
@@ -65,12 +133,11 @@ void CensusOps<Tune>::execute_block_x2(
     const uint8_t *src0 = reinterpret_cast<const uint8_t *>(src);
     feature_type *dst0 = dst;
 
-    const int bx_end = std::min(width, Tune::census::h_block);
-    for (int bx = 0; bx < bx_end; bx += Tune::census::h_step) {
+    for (int bx = 0; bx < width; bx += Tune::census::h_step) {
 
-      if ((bx + Tune::census::h_step) > bx_end) {
+      if ((bx + Tune::census::h_step) > width) {
         // avoid overshoot
-        int overshoot = (bx + Tune::census::h_step) - bx_end;
+        int overshoot = (bx + Tune::census::h_step) - width;
         src0 -= overshoot;
         dst0 -= overshoot;
 
@@ -103,11 +170,6 @@ void CensusOps<Tune>::execute_patch_x2(
     CensusOps::PatchLayout &r,
     feature_type *dst,
     int dst_pitch) {
-
-  // It's tempting for people to change the feature size thinking they will
-  // get better descriptors. This would lead to memory errors below, so
-  // put in an additional assert
-  static_assert(consts::feature_width == 9, "Do not change the feature size!");
 
   using simd = typename Tune::simd;
   using p1_t = typename simd::reg::p1_t;
